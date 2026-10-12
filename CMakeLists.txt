@@ -69,6 +69,8 @@ add_library(control
     src/design.cpp
     src/discretize.cpp
     src/lti.cpp
+    src/mpc.cpp
+    src/pid.cpp
     src/types.cpp)
 add_library(control::control ALIAS control)
 
@@ -130,6 +132,8 @@ add_executable(control_tests
     tests/design_test.cpp
     tests/discretize_test.cpp
     tests/lti_test.cpp
+    tests/mpc_test.cpp
+    tests/pid_test.cpp
     tests/types_test.cpp)
 target_link_libraries(control_tests PRIVATE control_test_support)
 target_compile_options(control_tests PRIVATE ${CONTROL_WARNINGS})

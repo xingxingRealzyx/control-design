@@ -27,6 +27,8 @@ model -> analyse -> discretize -> design gains -> export -> firmware
 | `control/analysis.h` | controllability/observability ranks, PBH per mode, Kalman decomposition, minimal realisation - **done** |
 | `control/design.h` | pole placement (Ackermann), LQR/DLQR, observer by duality, Kalman steady-state gain, integral action, reference feedforward - **done** |
 | `control/codegen.h` | export the design as a deployable C++17 controller header - **done** |
+| `control/pid.h` | tuning from a model (critical proportion, pole placement), margins, and the runtime with derivative-on-measurement, filtering, anti-windup and rate limiting - **done** |
+| `control/mpc.h` | receding-horizon QP in velocity form: prediction matrices, terminal cost, input and slew constraints, bounded solve - **done** |
 
 The pipeline is complete end to end:
 
@@ -43,7 +45,7 @@ Build and test:
 ```bash
 cmake --preset release            # or: debug, ci, sanitizers
 cmake --build --preset release -j
-ctest --preset release            # 58 tests, two executables
+ctest --preset release            # 80 tests, two executables
 
 ./build/release/design_workflow_example
 ```
@@ -66,6 +68,94 @@ unreachable" is actionable and "rank 3 < 4" is not. The dual statements hold for
 observability (`detectable` vs `undetectable`), and a *marginal* result is
 reported separately: a system that is controllable only through a `1e-8` entry is
 full rank in exact arithmetic and wants gains of order `1e8` in practice.
+
+## PID: the four structures that are not optional
+
+`PidController` implements all four of the things a PID needs to survive an
+actuator, because a badly *structured* PID looks perfectly tuned in simulation and
+winds up, overshoots and chatters on hardware:
+
+1. **Derivative on the measurement, negated** - never on the error, so a setpoint
+   step does not differentiate into a spike. The test asserts the first command
+   after a step is `Kp*e` exactly, with `Kd = 100` in place.
+2. **Derivative filtering** with `Td/N`, `N` configurable (8..20 is the usual
+   range, lower for a noisy sensor).
+3. **Anti-windup by clamping**: the integrator is held while the output is
+   saturated in the direction the error would push it, plus an independent bound
+   on the integral term. The test drives 500 ticks of a 100-unit error into a
+   +/-1 actuator and checks the integral term stays bounded (without the hold it
+   would reach 5000).
+4. **Output and rate limiting**, with `saturated()` and `rate_limited()` reported
+   so the caller can see which one is active.
+
+Tuning comes from a model rather than only from an experiment:
+
+* `TuneZieglerNicholsFromModel` finds the ultimate gain and period at the phase
+  crossover, and **refuses** a plant whose phase never reaches -180 degrees
+  instead of inventing a gain - a first-order lag has no ultimate gain, and this
+  method does not apply to it. Verified against the textbook case `1/(s+1)^3`,
+  where `Ku = 8` and `Pu = 2 pi / sqrt(3)`.
+* `TunePolePlacement` matches coefficients exactly for a first-order plant with PI
+  and a second-order plant with PID, refusing other shapes with a pointer to
+  `PlacePoles`/`LinearQuadraticRegulator` rather than approximating silently.
+
+One honest caveat is built into the API: **pole placement places poles, and the
+controller's own zeros still shape the response.** Asking for 10 percent overshoot
+on a second-order plant yields about 27 percent, because the PID introduces zeros
+the characteristic polynomial matching knows nothing about. So `PidDesign` carries
+the **simulated** overshoot and settling time and warns when they miss the
+request - which is the difference between a design note and a surprise on the
+test bench.
+
+## MPC: verified by a theorem, not by a step response
+
+`control/mpc.h` uses the velocity form (the decision variable is the input
+increment), which puts integral action into the structure rather than into an
+extra state someone has to remember to add. The prediction stacks into
+`Y = Phi xi + Gamma dU` and the cost becomes a small dense QP per tick.
+
+The claim that makes it trustworthy is checkable without a simulation:
+
+> With the terminal cost taken from the DARE solution of the **augmented** problem
+> and the stage cost covering the steps the terminal cost does not, the
+> unconstrained optimum **equals the LQR gain for any horizon**.
+
+That holds here to `5.6e-9` at horizons 1, 5 and 20 - the residual being the DARE's
+own convergence tolerance. Three separate mistakes were caught by exactly this
+test, all of which produced a stable controller and would have passed any step-
+response check:
+
+1. the terminal cost was computed from the **plant's** DARE instead of the
+   augmented one (the cost penalises `du`, so the equivalent LQR problem is on the
+   augmented model);
+2. the terminal cost was **never added to the QP** at all - the design stored it
+   and then ignored it;
+3. the stage cost covered steps `1..N` while the terminal cost prices step `N`,
+   double-counting that step.
+
+A fourth bug was found by the tracking test rather than the equivalence test, and
+is the most instructive: the terminal penalty was measured from the **origin**, so
+for a non-zero reference the stage cost pulled the output towards `r` while the
+terminal cost pulled the state towards `0`. The loop settled quietly at
+`y = 1.034` for a reference of `2.0` - a wrong answer that looks exactly like a
+converged one. The penalty is now measured from the equilibrium that holds the
+reference, solved from the same `[(A-I) B; C 0]` system the feedforward uses, and
+tracking is exact (`y = 2.0000000000`, `u = 4.0000000000`).
+
+Constraints, with the guarantee stated precisely rather than implied:
+
+| constraint | guarantee | verified |
+|---|---|---|
+| input increment (slew) | exact, enforced inside the QP | `max abs(du) = 0.5000000000` for a limit of 0.5 |
+| absolute input | exact on the command that leaves the controller | `peak abs(u) = 1.0000000000` for a limit of 1.0 |
+| solver | bounded iterations, convergence reported | worst case 240 of 500, all converged |
+
+The distinction in that table is deliberate. The absolute limit is applied as a
+saturation on the outgoing command (the standard embedded compromise) rather than
+inside the QP; doing both exactly needs a projection onto a band in the cumulative
+sum, which is a QP of its own. The violation is zero either way, and the move is
+not the exact constrained optimum while the limit binds - so the header says
+which of the two is guaranteed instead of leaving it to be discovered.
 
 ## The generated code is verified, not trusted
 
@@ -198,7 +288,14 @@ Recorded because each one was invisible in a plot and would have cost real time:
    still stable, which is why nothing but an exact-value check would notice. The
    product is now carried out in complex arithmetic and a non-conjugate request
    is refused.
-9. **A `JacobiSVD` was used without `ComputeThinU`/`ComputeThinV`**, which aborts
+9. **The PID pole-placement characteristic polynomial was missing its leading
+   `s`.** The gains came out right (`Kp = 1.9`, `Ki = 4.5`) while the reported
+   poles were the roots of the wrong equation, because the plant denominator was
+   never multiplied by `s`. A test that checked only the gains would have passed.
+10. **The MPC terminal cost was measured from the origin**, so a non-zero
+   reference settled at a compromise between the stage cost and the terminal cost
+   (see above).
+11. **A `JacobiSVD` was used without `ComputeThinU`/`ComputeThinV`**, which aborts
    in a debug build and reads out of bounds in a release build. Found by the test
    suite segfaulting, which is exactly why the test framework has a `KCTL_TRACE`
    switch: when a test crashes the process instead of failing an assertion,
