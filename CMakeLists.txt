@@ -66,6 +66,13 @@ option(CONTROL_WERROR "Treat warnings as errors" OFF)
 add_library(control
     src/adrc.cpp
     src/analysis.cpp
+    src/ident_bridge.cpp
+    src/ident_dataset.cpp
+    src/ident_excitation.cpp
+    src/ident_ls.cpp
+    src/ident_rls.cpp
+    src/ident_subspace.cpp
+    src/ident_validate.cpp
     src/codegen.cpp
     src/design.cpp
     src/discretize.cpp
@@ -130,6 +137,13 @@ add_test(NAME generated_controller COMMAND generated_controller_test)
 add_executable(control_tests
     tests/adrc_test.cpp
     tests/analysis_test.cpp
+    tests/ident_bridge_test.cpp
+    tests/ident_dataset_test.cpp
+    tests/ident_excitation_test.cpp
+    tests/ident_ls_test.cpp
+    tests/ident_rls_test.cpp
+    tests/ident_subspace_test.cpp
+    tests/ident_validate_test.cpp
     tests/codegen_test.cpp
     tests/design_test.cpp
     tests/discretize_test.cpp
@@ -138,6 +152,8 @@ add_executable(control_tests
     tests/pid_test.cpp
     tests/types_test.cpp)
 target_link_libraries(control_tests PRIVATE control_test_support)
+# The identification tests share a fixture describing a known system.
+target_include_directories(control_tests PRIVATE tests)
 target_compile_options(control_tests PRIVATE ${CONTROL_WARNINGS})
 
 add_test(NAME control_tests COMMAND control_tests)

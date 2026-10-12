@@ -30,6 +30,7 @@ model -> analyse -> discretize -> design gains -> export -> firmware
 | `control/pid.h` | tuning from a model (critical proportion, pole placement), margins, and the runtime with derivative-on-measurement, filtering, anti-windup and rate limiting - **done** |
 | `control/mpc.h` | receding-horizon QP in velocity form: prediction matrices, terminal cost, input and slew constraints, bounded solve - **done** |
 | `control/adrc.h` | linear active disturbance rejection: bandwidth-parameterized ESO, disturbance cancellation, noise-gain reporting - **done** |
+| `control/ident/*.h` | system identification: ARX least squares, recursive least squares, excitation design, model validation, subspace realization, and the bridge into the design library - **done** |
 
 The pipeline is complete end to end:
 
@@ -46,7 +47,7 @@ Build and test:
 ```bash
 cmake --preset release            # or: debug, ci, sanitizers
 cmake --build --preset release -j
-ctest --preset release            # 88 tests, two executables
+ctest --preset release            # 118 tests, two executables
 
 ./build/release/design_workflow_example
 ```
@@ -69,6 +70,89 @@ unreachable" is actionable and "rank 3 < 4" is not. The dual statements hold for
 observability (`detectable` vs `undetectable`), and a *marginal* result is
 reported separately: a system that is controllable only through a `1e-8` entry is
 full rank in exact arithmetic and wants gains of order `1e8` in practice.
+
+## Identification: where the model comes from
+
+Everything else in this repository and in `kalman-filter` assumes a model is
+already in hand. On a real machine it is not: the inertia, the friction, the
+torque constant are not known to the accuracy a design needs, and deriving them
+from physics leaves out whatever was not modelled. The model has to come from
+data.
+
+```
+real machine --(experiment: drive the input, record the output)--> data
+data --(ident)--> model A B C D
+model --(this library)--> gains --> firmware
+model --(kalman-filter)--> state estimator
+```
+
+`control/ident/` closes that first mile:
+
+| module | what it does |
+|---|---|
+| `ls.h` | ARX fit by QR least squares, with the regressor's condition number as the diagnosis of a poor experiment |
+| `rls.h` | the same estimate recursively, with a forgetting factor that tracks a drifting plant |
+| `excitation.h` | PRBS, chirp, multisine generation, and a **pre-experiment** check of whether the input can identify the order being asked for |
+| `validate.h` | held-out free-run fit, residual whiteness, residual-input correlation, and order selection on held-out data |
+| `subspace.h` | realization from Markov parameters (ERA / Ho-Kalman), where the order comes from the Hankel singular values rather than from trying orders until the fit stops improving |
+| `bridge.h` | identified model to `LtiSystem`, plus an assessment of whether it is fit to design against |
+
+Two positions are built into the API rather than left to discipline:
+
+* **A model that fits the data it was fitted to has demonstrated nothing.** Any
+  model with enough parameters does that. So the data is split into contiguous
+  training and validation records - contiguous, not interleaved, because
+  consecutive samples of a dynamic system are correlated - and passing the same
+  record twice makes the report say loudly that the number proves nothing.
+* **The free-run fit is reported, not the one-step fit.** The one-step prediction
+  uses the measured past and is always the more flattering number; a large gap
+  between the two is the clearest single indicator that a model is leaning on the
+  measured past instead of having learned the dynamics.
+
+Measured, on data generated from a system whose coefficients are known exactly:
+
+| claim | result |
+|---|---|
+| ARX recovers the coefficients from clean data | exact to `1e-8` |
+| recursive least squares vs batch, no forgetting | parameters agree to `3.8e-09` (the residual influence of the initial covariance) |
+| a gain change half way through the record | batch reports `b1 = 1.0194` - between the two plants, describing neither; RLS with forgetting reports `1.5000` |
+| the state-space form reproduces the difference equation | impulse responses agree to `1e-12` |
+| frequency response, from a sinusoid vs analytically | agree to `1e-6` |
+| ERA order determination | exactly 2 for a 2nd-order system, exactly 4 for a 4th (singular values `4.08, 2.07, 0.59, 0.097, 1.4e-16`) |
+| a constant input vs a PRBS | condition number `1.7e33` (refused) vs `4.2` (accepted) |
+| an order that is too low | detected: residual-input correlation `0.70` against a confidence bound of `0.051`, where the correct order gives `0.046` |
+
+### Five bugs the identification tests caught
+
+Three were mine in the *test methodology*, which is worth separating from the
+code bugs because a wrong test is harder to notice than wrong code:
+
+1. **The suite was nondeterministic** - 19, 15 and 22 of 29 passing across three
+   runs of the same binary. AddressSanitizer found it: `input = input.head(n)` in
+   the test fixture is a self-aliasing assignment, and Eigen resizes the
+   destination - invalidating the source view - before copying. It read freed
+   memory. A nondeterministic test suite is worse than a failing one, because it
+   looks like flakiness in the code under test.
+2. **The residual whiteness verdict used a per-lag bound**, which is a
+   multiple-comparisons error: with 25 lags at 95 percent confidence the chance of
+   at least one false positive is `1 - 0.95^25`, about 72 percent, so a perfectly
+   white residual was reported as structured nearly every time. The verdict now
+   comes from the portmanteau statistic against a chi-square quantile.
+3. **Whiteness was tested on the free-run residual.** The free-run error
+   accumulates the simulation's own drift and is strongly autocorrelated for any
+   model at all, so the test asked whether a simulation error is white - and the
+   answer is always no. It now uses the one-step (equation) error, which is the
+   quantity that is white when the model order is right.
+4. **The state-space conversion used the wrong companion convention**: the A
+   matrix of the controllable form with the B and C of the observable one, and
+   then a sign error in the first row on top of it. The right poles and the wrong
+   numerator - the kind of error a pole check passes and an impulse-response check
+   fails.
+5. **The ERA realization prepended a zero to the impulse response** "for a
+   strictly proper model". That shifts the Hankel so its first entry is `D`
+   instead of `C B`, and since Ho-Kalman needs `C A^(r+c) B`, the result is the
+   correct Hankel plus a rank-one perturbation. The symptom was an identified
+   order always one too high.
 
 ## ADRC: one number with a physical meaning, and two bandwidths
 
