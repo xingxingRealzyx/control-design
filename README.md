@@ -24,11 +24,11 @@ model -> analyse -> discretize -> design gains -> export -> firmware
 | `control/types.h` | state-space container, validation, method enumerations - **done** |
 | `control/lti.h` | poles, zeros, stability, margins, DC gain, frequency response, Lyapunov solvers, Gramians, Hankel values, balanced truncation - **done** |
 | `control/discretize.h` | ZOH (van Loan), Tustin, forward/backward Euler, matched pole-zero, sample-time rule, Padé delay, series connection, conversion report - **done** |
-| `control/analysis.h` | controllability/observability ranks, PBH, canonical forms - *not yet* |
+| `control/analysis.h` | controllability/observability ranks, PBH per mode, Kalman decomposition, minimal realisation - **done** |
 | `control/design.h` | pole placement, LQR/DLQR, observer design, integral action - *not yet* |
 | `control/codegen.h` | export a design as a C++17 header for the target - *not yet* |
 
-The three "not yet" modules are the reason the repository exists; they are listed
+The two "not yet" modules are the reason the repository exists; they are listed
 here so the scope is not mistaken for the ambition.
 
 Build and test:
@@ -36,10 +36,29 @@ Build and test:
 ```bash
 cmake --preset release            # or: debug, ci, sanitizers
 cmake --build --preset release -j
-ctest --preset release            # 24 tests
+ctest --preset release            # 34 tests
 
 ./build/release/design_workflow_example
 ```
+
+## Why "not controllable" is three different answers
+
+`AnalyseControllability` does not return a boolean. It distinguishes:
+
+1. **fully controllable** - arbitrary pole placement is available;
+2. **stabilizable** - some state is unreachable, but every unreachable mode is
+   already stable: a stabilising controller exists and the offending states can
+   only be left to decay;
+3. **unstabilizable** - an unstable mode the input cannot influence. No
+   controller fixes this. It is a statement about where the actuator is, and the
+   tool says so instead of producing gains for a plant that will diverge.
+
+The classification is per mode (PBH test, smallest singular value of
+`[A - lambda I, B]`), not by matrix rank, because "the mode at +1.0 is
+unreachable" is actionable and "rank 3 < 4" is not. The dual statements hold for
+observability (`detectable` vs `undetectable`), and a *marginal* result is
+reported separately: a system that is controllable only through a `1e-8` entry is
+full rank in exact arithmetic and wants gains of order `1e8` in practice.
 
 ## What the implementation promises
 
@@ -80,6 +99,9 @@ the closed form.
 | Padé `n=3` phase at 1 rad/s | `-5.731 deg` (exact `-5.730`) |
 | balanced truncation of a 3rd-order system, DC gain | `1.020002` vs `1.020010` full |
 | forward Euler at `Ts = 1.5 s` | destabilized pole reported, not hidden |
+| PBH measure, reachable vs unreachable mode | `> 1e-3` vs `< 1e-12` |
+| Kalman decomposition, four subspace dimensions | sum to `n` in all three test systems |
+| minimal realisation, frequency response vs full model | `< 1e-10` relative over three decades |
 
 ## Bugs this repository's tests caught while it was written
 
@@ -101,11 +123,24 @@ Recorded because each one was invisible in a plot and would have cost real time:
    transformation was assembled wrong - the reduced model still had the right
    order and was still stable, so only the accuracy check caught it.
 5. **`Series` composed the matrices wrong** (`C2*D1` instead of `D2*D1 + D2`).
-6. **A `JacobiSVD` was used without `ComputeThinU`/`ComputeThinV`**, which aborts
+6. **The Kalman decomposition summed to more than `n`.** Two separate faults: a
+   loop that tested candidate direction `i` but copied direction `j` (so nothing
+   was ever rejected), and a relative rank test applied to a *nearly zero*
+   projection - which always finds a unit direction, because its own largest
+   singular value sets the scale. The intersection of two subspaces meeting only
+   at the origin came back one-dimensional. Fixed by deciding "this projection is
+   negligible" before asking for a basis, against the size of the subspace being
+   projected.
+7. **A `JacobiSVD` was used without `ComputeThinU`/`ComputeThinV`**, which aborts
    in a debug build and reads out of bounds in a release build. Found by the test
    suite segfaulting, which is exactly why the test framework has a `KCTL_TRACE`
    switch: when a test crashes the process instead of failing an assertion,
    buffered stdout is lost and there is no other way to tell which test died.
+
+Cross-checking: the Kalman subspace dimensions are verified against an
+independent NumPy implementation of the same projection-based intersection, and
+that reference is what caught two wrong expectations in the tests - the same
+algorithm written twice is what makes a dimension count trustworthy.
 
 ## Continuous integration
 

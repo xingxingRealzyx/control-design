@@ -64,6 +64,7 @@ option(CONTROL_WERROR "Treat warnings as errors" OFF)
 # Library: controller design and analysis, for the host.
 # ---------------------------------------------------------------------------
 add_library(control
+    src/analysis.cpp
     src/discretize.cpp
     src/lti.cpp
     src/types.cpp)
@@ -93,6 +94,7 @@ target_link_libraries(control_test_support PUBLIC control::control)
 target_compile_options(control_test_support PRIVATE ${CONTROL_WARNINGS})
 
 add_executable(control_tests
+    tests/analysis_test.cpp
     tests/discretize_test.cpp
     tests/lti_test.cpp
     tests/types_test.cpp)
