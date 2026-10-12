@@ -53,6 +53,12 @@ struct ResidualTest {
     int first_significant_lag = -1;  // -1 when none is significant
     bool white = true;
     double cumulative_whiteness = 0.0;  // the portmanteau statistic
+    // The chi-square bound that statistic is compared against. Exposed because
+    // a verdict at 95 percent is by construction close to its bound on a finite
+    // record, so a caller that wants a test with margin needs the number, not
+    // the boolean: the last bits of a floating-point summation can flip a
+    // verdict that sits on the bound.
+    double cumulative_bound = 0.0;
     std::string notes;
 };
 ResidualTest TestResidualWhiteness(const Eigen::VectorXd& residual,

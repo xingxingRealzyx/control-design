@@ -13,13 +13,53 @@
 
 #include <Eigen/Core>
 #include <cmath>
-#include <random>
 
 #include "control/ident/dataset.h"
 #include "control/ident/excitation.h"
 #include "control/ident/ls.h"
 
 namespace ident_test {
+
+// A deterministic normal generator, written out rather than taken from the
+// standard library.
+//
+// `std::mt19937` is specified exactly, but `std::normal_distribution` is not:
+// its algorithm is implementation-defined, so the "same" test data is a
+// different sequence on libstdc++ (Linux CI) than on libc++ (macOS). The
+// statistical tests below then land on different sides of their thresholds on
+// the two platforms, which is what happened - two validation tests passed
+// locally and failed on the Linux runners with no code difference between them.
+// Test data that depends on implementation-defined behaviour is not
+// reproducible, and a statistical test whose data is not reproducible is not a
+// test.
+class DeterministicNormal {
+ public:
+    explicit DeterministicNormal(unsigned int seed) : state_(seed | 1u) {}
+
+    double Next() {
+        const double u1 = NextUniform();
+        const double u2 = NextUniform();
+        return std::sqrt(-2.0 * std::log(u1)) *
+               std::cos(2.0 * 3.14159265358979323846 * u2);
+    }
+
+ private:
+    // xorshift64, not a linear congruential generator.
+    //
+    // An LCG was tried first and its lattice structure left enough low-order
+    // correlation for a 20000-sample portmanteau test to detect it: the
+    // whiteness test then failed on the "white" data, which is a true statement
+    // about the generator and a useless statement about the test. A generator
+    // used to produce reference noise has to be good enough that a whiteness
+    // test on its output passes, otherwise it is testing the generator.
+    double NextUniform() {
+        state_ ^= state_ << 13;
+        state_ ^= state_ >> 7;
+        state_ ^= state_ << 17;
+        return (static_cast<double>(state_ >> 11) + 0.5) / 9007199254740992.0;
+    }
+    unsigned long long state_;
+};
 
 // y[k] = 1.5 y[k-1] - 0.7 y[k-2] + 0.5 u[k-1] + 0.2 u[k-2]
 // Poles: roots of z^2 - 1.5z + 0.7, at 0.75 +/- 0.37j, |z| = 0.838.
@@ -54,8 +94,7 @@ inline control::ident::Dataset GenerateData(
     data.output_name = "y";
     const int n = static_cast<int>(input.size());
     data.output = Eigen::VectorXd::Zero(n);
-    std::mt19937 generator(seed);
-    std::normal_distribution<double> noise(0.0, noise_standard_deviation);
+    DeterministicNormal generator(seed);
     for (int k = 0; k < n; ++k) {
         double value = 0.0;
         if (k >= 1) {
@@ -67,7 +106,7 @@ inline control::ident::Dataset GenerateData(
         } else if (k == 1) {
             value += -known.a1 * data.output(0);
         }
-        data.output(k) = value + noise(generator);
+        data.output(k) = value + noise_standard_deviation * generator.Next();
     }
     return data;
 }

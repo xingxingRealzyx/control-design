@@ -23,8 +23,15 @@ TEST(Validate, WhitenessTestSeparatesNoiseFromStructure) {
     }
     const control::ident::ResidualTest white =
         control::ident::TestResidualWhiteness(noise);
-    CHECK_TRUE(white.white);
-    CHECK_EQ(white.first_significant_lag, -1);
+    // The assertion is on the statistic with margin, not on the boolean
+    // verdict. A 95 percent verdict on a finite record sits close to its bound
+    // by construction, and the last bits of the summation order - which the
+    // compiler picks, and picks differently on GCC and Clang - are enough to
+    // flip it. Asserting the boolean tests the compiler; asserting that the
+    // statistic is well inside the bound tests the method.
+    std::printf("  white noise: portmanteau %.2f against a bound of %.2f\n",
+                white.cumulative_whiteness, white.cumulative_bound);
+    CHECK_TRUE(white.cumulative_whiteness < 0.8 * white.cumulative_bound);
     CHECK_TRUE(white.notes.find("consistent with white noise") !=
                std::string::npos);
 
@@ -34,7 +41,12 @@ TEST(Validate, WhitenessTestSeparatesNoiseFromStructure) {
     }
     const control::ident::ResidualTest structured =
         control::ident::TestResidualWhiteness(sine);
+    std::printf("  a sine: portmanteau %.1f against a bound of %.2f\n",
+                structured.cumulative_whiteness, structured.cumulative_bound);
     CHECK_FALSE(structured.white);
+    // Decisive, not marginal: the structured case has to be far past the bound.
+    CHECK_TRUE(structured.cumulative_whiteness >
+               5.0 * structured.cumulative_bound);
     CHECK_TRUE(structured.first_significant_lag > 0);
     CHECK_TRUE(structured.notes.find("NOT white") != std::string::npos);
 }

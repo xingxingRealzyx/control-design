@@ -93,6 +93,7 @@ ResidualTest TestResidualWhiteness(const Eigen::VectorXd& residual, int max_lag,
     const double chi_square_bound =
         k *
         std::pow(1.0 - 2.0 / (9.0 * k) + z * std::sqrt(2.0 / (9.0 * k)), 3.0);
+    test.cumulative_bound = chi_square_bound;
     test.white = test.cumulative_whiteness < chi_square_bound;
 
     std::ostringstream notes;
