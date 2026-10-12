@@ -64,6 +64,7 @@ option(CONTROL_WERROR "Treat warnings as errors" OFF)
 # Library: controller design and analysis, for the host.
 # ---------------------------------------------------------------------------
 add_library(control
+    src/adrc.cpp
     src/analysis.cpp
     src/codegen.cpp
     src/design.cpp
@@ -127,6 +128,7 @@ target_include_directories(generated_controller_test PRIVATE
 add_test(NAME generated_controller COMMAND generated_controller_test)
 
 add_executable(control_tests
+    tests/adrc_test.cpp
     tests/analysis_test.cpp
     tests/codegen_test.cpp
     tests/design_test.cpp

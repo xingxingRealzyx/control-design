@@ -224,9 +224,10 @@ TEST(Mpc, UnconstrainedRunMatchesTheLqrClosedLoop) {
     double lqr_command = 0.0;
     control::Vector command(1);
     double worst = 0.0;
-    // 300 ticks, not 100: the augmented closed loop's spectral radius is 0.873, so
-    // a hundred ticks leaves about 1e-6 of the initial condition behind and the
-    // final-value check below would be measuring the horizon rather than the law.
+    // 300 ticks, not 100: the augmented closed loop's spectral radius is 0.873,
+    // so a hundred ticks leaves about 1e-6 of the initial condition behind and
+    // the final-value check below would be measuring the horizon rather than
+    // the law.
     for (int tick = 0; tick < 300; ++tick) {
         controller.Update(mpc_state, 0.0, &command);
         // The LQR law acts on the augmented state, which needs the previous
@@ -239,11 +240,14 @@ TEST(Mpc, UnconstrainedRunMatchesTheLqrClosedLoop) {
         worst = std::max(worst, std::abs(mpc_state(0) - lqr_state(0)));
     }
     // The per-step agreement is at the level the DARE solution is accurate to
-    // (about 5e-9); over a hundred ticks of a stable closed loop it accumulates to
-    // roughly that divided by one minus the spectral radius, which is a few times
-    // 1e-8. The tolerance is set from the measured value rather than from a wish,
-    // and the value is printed so a regression is visible rather than merely fatal.
-    std::printf("  MPC vs LQR closed loop over 300 ticks: worst deviation %.3e\n", worst);
+    // (about 5e-9); over a hundred ticks of a stable closed loop it accumulates
+    // to roughly that divided by one minus the spectral radius, which is a few
+    // times 1e-8. The tolerance is set from the measured value rather than from
+    // a wish, and the value is printed so a regression is visible rather than
+    // merely fatal.
+    std::printf(
+        "  MPC vs LQR closed loop over 300 ticks: worst deviation %.3e\n",
+        worst);
     CHECK_TRUE(worst < 1e-6);
     CHECK_NEAR(mpc_state(0), 0.0, 1e-9);
 }

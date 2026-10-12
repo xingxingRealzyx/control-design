@@ -38,7 +38,7 @@
       "displayName": "CI",
       "description": "Release plus -Werror: warnings are failures on CI",
       "cacheVariables": {
-        "KALMAN_WERROR": "ON"
+        "CONTROL_WERROR": "ON"
       }
     },
     {
@@ -48,7 +48,7 @@
       "description": "Debug plus AddressSanitizer and UndefinedBehaviorSanitizer",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
-        "KALMAN_WERROR": "ON",
+        "CONTROL_WERROR": "ON",
         "CMAKE_CXX_FLAGS": "-fsanitize=address,undefined -fno-omit-frame-pointer"
       }
     }

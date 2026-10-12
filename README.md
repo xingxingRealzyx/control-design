@@ -29,6 +29,7 @@ model -> analyse -> discretize -> design gains -> export -> firmware
 | `control/codegen.h` | export the design as a deployable C++17 controller header - **done** |
 | `control/pid.h` | tuning from a model (critical proportion, pole placement), margins, and the runtime with derivative-on-measurement, filtering, anti-windup and rate limiting - **done** |
 | `control/mpc.h` | receding-horizon QP in velocity form: prediction matrices, terminal cost, input and slew constraints, bounded solve - **done** |
+| `control/adrc.h` | linear active disturbance rejection: bandwidth-parameterized ESO, disturbance cancellation, noise-gain reporting - **done** |
 
 The pipeline is complete end to end:
 
@@ -45,7 +46,7 @@ Build and test:
 ```bash
 cmake --preset release            # or: debug, ci, sanitizers
 cmake --build --preset release -j
-ctest --preset release            # 80 tests, two executables
+ctest --preset release            # 88 tests, two executables
 
 ./build/release/design_workflow_example
 ```
@@ -68,6 +69,58 @@ unreachable" is actionable and "rank 3 < 4" is not. The dual statements hold for
 observability (`detectable` vs `undetectable`), and a *marginal* result is
 reported separately: a system that is controllable only through a `1e-8` entry is
 full rank in exact arithmetic and wants gains of order `1e8` in practice.
+
+## ADRC: one number with a physical meaning, and two bandwidths
+
+`control/adrc.h` implements linear active disturbance rejection control. Rather
+than model the plant well enough to invert it, it treats everything unmodelled -
+parameter error, external disturbance, unmodelled coupling - as one additive term
+entering through the input, estimates it with an extended state observer, and
+cancels it. The design needs `b0` (the input gain) and two bandwidths.
+
+The observer gains come from a single bandwidth so that the estimation-error
+dynamics have **every pole at `-wo`**:
+
+```
+beta = [2 wo, wo^2]          2nd-order ESO   (first-order plant)
+beta = [3 wo, 3 wo^2, wo^3]  3rd-order ESO   (second-order plant)
+```
+
+That identity is checked **algebraically** in the test suite: "every pole at
+`-wo`" is exactly the statement that the characteristic polynomial is
+`(lambda + wo)^m`, which is exactly the statement that `beta_i = C(m, i+1) wo^(i+1)`.
+It is not checked through an eigensolver, because a repeated root makes the matrix
+defective and the eigenvalue error then grows like the m-th root of round-off
+(about `1e-5` for a triple root) - the test would be measuring the eigensolver
+rather than the design. The observer's *speed* is verified in the time domain
+instead, where a defective root is harmless.
+
+What the tests establish, with the measured numbers:
+
+| claim | result |
+|---|---|
+| observer poles, both ESO orders | exactly `-wo` (algebraic identity) |
+| discrete observer = exact ZOH of the continuous one | agrees with a fine integrator to `1e-5` (the integrator's own error) |
+| constant disturbance rejection, first-order plant | steady-state error `~1e-4`; a proportional controller matched to the same bandwidth leaves `>0.05` |
+| tracking approaches the ideal `wc/(s+wc)` as `wo/wc` grows | settling `1.477 s` at ratio 3 against an ideal `1.000 s`, no overshoot |
+| second-order law follows `zeta` | `zeta = 1` gives `0.17 %` overshoot, `zeta = 0.5` gives `18.2 %` (theory: 16.3 %) |
+| `b0` wrong by a factor of two | still settles, zero steady-state error, speed spread under 10 % |
+
+That last row is the property ADRC is chosen for, and it is worth being precise
+about what the test does *not* claim: the ordering of the settling times under a
+wrong `b0` is reported rather than asserted, because measured it is **not** the
+naive prediction (a larger `b0` settles marginally faster, since the observer's own
+model gain moves with `b0` and dominates the transient). Asserting the naive
+ordering would have been asserting a guess about a subtle interaction.
+
+`AnalyseAdrc` reports the **noise gain** - the multiple of the controller bandwidth
+by which measurement noise reaches the control signal - because that is the real
+cost of raising `wo`, and a trade with a number attached is a trade that can be
+argued with.
+
+The observer is discretized by **exact zero-order hold**, not Euler: at the
+bandwidths ADRC runs at, an Euler observer can be unstable for a sample time the
+exact one handles.
 
 ## PID: the four structures that are not optional
 
@@ -295,7 +348,21 @@ Recorded because each one was invisible in a plot and would have cost real time:
 10. **The MPC terminal cost was measured from the origin**, so a non-zero
    reference settled at a compromise between the stage cost and the terminal cost
    (see above).
-11. **A `JacobiSVD` was used without `ComputeThinU`/`ComputeThinV`**, which aborts
+11. **The ADRC observer matrix was built with its gains on the diagonal**
+   (`diag(-b1, -b2)`) instead of in the first column with the integrator chain on
+   the superdiagonal. The eigenvalues were then `-b_i` rather than `-wo` (measured:
+   `-40` and `-400` instead of `-20` twice), so the disturbance estimate was wrong
+   and the loop settled at `0.548` for a reference of `1.0`. One mistake, six
+   failing tests - and the identity the design is *named* for is what caught it.
+12. **The `ci` preset never enabled `-Werror`.** `CMakePresets.json` set
+   `KALMAN_WERROR` while `CMakeLists.txt` read `CONTROL_WERROR`, so the preset
+   silently did nothing and CMake printed a discarded `unused-cli` warning. All the
+   `-Werror` verification in this repository's history was done by passing
+   `-DCONTROL_WERROR=ON` explicitly or in the containers, so the code is
+   warning-free - but the *guarantee* in CI was weaker than it appeared. Found by
+   the agent scaffolding the sibling `sysid` repository, which noticed the discarded
+   warning while copying the presets. Fixed by renaming the preset entry.
+13. **A `JacobiSVD` was used without `ComputeThinU`/`ComputeThinV`**, which aborts
    in a debug build and reads out of bounds in a release build. Found by the test
    suite segfaulting, which is exactly why the test framework has a `KCTL_TRACE`
    switch: when a test crashes the process instead of failing an assertion,
