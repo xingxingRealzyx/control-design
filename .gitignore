@@ -1,0 +1,39 @@
+# Build output
+build/
+build-*/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+CTestTestfile.cmake
+Makefile
+compile_commands.json
+
+# Binaries and libraries
+*.o
+*.a
+*.so
+*.so.*
+*.dylib
+*.dll
+*.exe
+*.out
+
+# Editor and OS noise
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
+
+# Vendored Eigen: its own .gitignore is NOT kept, because one of its rules is
+# the bare word `core`, and git matches case-sensitively: on a Linux checkout
+# that rule excludes Eigen/Core and Eigen/src/Core/, which are the most
+# important headers in the library. macOS hides the problem (case-insensitive
+# filesystem), so the exclusion has to be neutralized explicitly here.
+!third_party/eigen/Eigen/**
+!third_party/eigen/unsupported/Eigen/**
+
+# Python helpers (the library itself is C++ only)
+__pycache__/
+*.pyc
