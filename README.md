@@ -25,18 +25,25 @@ model -> analyse -> discretize -> design gains -> export -> firmware
 | `control/lti.h` | poles, zeros, stability, margins, DC gain, frequency response, Lyapunov solvers, Gramians, Hankel values, balanced truncation - **done** |
 | `control/discretize.h` | ZOH (van Loan), Tustin, forward/backward Euler, matched pole-zero, sample-time rule, Padé delay, series connection, conversion report - **done** |
 | `control/analysis.h` | controllability/observability ranks, PBH per mode, Kalman decomposition, minimal realisation - **done** |
-| `control/design.h` | pole placement, LQR/DLQR, observer design, integral action - *not yet* |
-| `control/codegen.h` | export a design as a C++17 header for the target - *not yet* |
+| `control/design.h` | pole placement (Ackermann), LQR/DLQR, observer by duality, Kalman steady-state gain, integral action, reference feedforward - **done** |
+| `control/codegen.h` | export the design as a deployable C++17 controller header - **done** |
 
-The two "not yet" modules are the reason the repository exists; they are listed
-here so the scope is not mistaken for the ambition.
+The pipeline is complete end to end:
+
+```
+model -> analyse -> discretize -> design -> emit -> firmware
+```
+
+`examples/generate_controller.cpp` emits the deployable header, and the test
+suite compiles that emitted header and checks it against an independent
+implementation (see "The generated code is verified, not trusted").
 
 Build and test:
 
 ```bash
 cmake --preset release            # or: debug, ci, sanitizers
 cmake --build --preset release -j
-ctest --preset release            # 34 tests
+ctest --preset release            # 58 tests, two executables
 
 ./build/release/design_workflow_example
 ```
@@ -59,6 +66,48 @@ unreachable" is actionable and "rank 3 < 4" is not. The dual statements hold for
 observability (`detectable` vs `undetectable`), and a *marginal* result is
 reported separately: a system that is controllable only through a `1e-8` entry is
 full rank in exact arithmetic and wants gains of order `1e8` in practice.
+
+## The generated code is verified, not trusted
+
+`control/codegen.h` emits a self-contained C++17 header: no exceptions, no RTTI,
+no heap, no recursion, all state in the object, compile-time dimensions so every
+loop has a fixed trip count, one `using Real = ...` to switch the target between
+float and double, saturation and a NaN guard on the input, and a provenance
+comment on every gain.
+
+None of that is taken on trust. `generate_controller` runs at **build time** and
+its output is compiled into `generated_controller_test`, which runs the emitted
+class against a separately written Eigen reference over the same input sequence -
+3000 ticks covering a step, a reversal and a segment that drives the actuator
+into its limit - and compares the commands:
+
+| check | result |
+|---|---|
+| ticks compared | 3000 |
+| ticks with the actuator saturated | 237 |
+| peak command | 20.000000 N (the limit) |
+| largest deviation from the reference | **3.553e-15** (relative 1.776e-16) |
+
+That is round-off, against a protocol tolerance of 1e-9 relative for double. The
+comparison is the point: the emitted code is hand-unrolled loops over
+hand-indexed arrays, and a transposed index or an inverted sign compiles cleanly
+and produces a controller that is *almost* right - the kind that survives review
+and fails on hardware. The integrator state is compared too, not just the
+command, because a divergence there can stay invisible in the output for a long
+time.
+
+Two things the emit path refuses, because the design and the code must not drift:
+
+* a gain with n+1 columns (a design that included integral action) is rejected by
+  the plain entry point rather than emitted with the integral gain dropped;
+* a continuous model is rejected outright - the emitted observer steps with the
+  plant's own matrices, so the caller has to hand over the sampled model the
+  firmware will actually run against.
+
+The float target gets specific attention: literals are emitted at 17 significant
+digits and wrapped in `static_cast<Real>(...)`, because `float k[]{0.30000000000000004}`
+is a narrowing conversion and a build that fails in the field over one awkward
+gain is not a hypothetical.
 
 ## What the implementation promises
 
@@ -99,6 +148,12 @@ the closed form.
 | Padé `n=3` phase at 1 rad/s | `-5.731 deg` (exact `-5.730`) |
 | balanced truncation of a 3rd-order system, DC gain | `1.020002` vs `1.020010` full |
 | forward Euler at `Ts = 1.5 s` | destabilized pole reported, not hidden |
+| LQR on the double integrator vs the analytic solution | P and K match to `3e-11` |
+| CARE residual | `5.7e-14` |
+| DARE residual (this implementation) | `5.0e-13` (scipy's published value: `2.1e-9`) |
+| pole placement, observer, integral gain vs scipy reference | exact to `1e-9` |
+| generated controller vs the reference over 3000 ticks | `3.6e-15` |
+| DLQR closed-loop spectral radius | `0.8149195372` |
 | PBH measure, reachable vs unreachable mode | `> 1e-3` vs `< 1e-12` |
 | Kalman decomposition, four subspace dimensions | sum to `n` in all three test systems |
 | minimal realisation, frequency response vs full model | `< 1e-10` relative over three decades |
@@ -131,7 +186,19 @@ Recorded because each one was invisible in a plot and would have cost real time:
    at the origin came back one-dimensional. Fixed by deciding "this projection is
    negligible" before asking for a basis, against the size of the subspace being
    projected.
-7. **A `JacobiSVD` was used without `ComputeThinU`/`ComputeThinV`**, which aborts
+7. **The Ackermann polynomial was evaluated backwards.** `coefficients(0)` holds
+   the *leading* coefficient, and the first version multiplied it by `A^0`. For
+   poles -2, -3 that computes `6A^2 + 5A + I` instead of `A^2 + 5A + 6I`, giving
+   K = [-11, -13] where [4, 2] was asked for - and an *unstable* closed loop. The
+   achieved-pole comparison caught it; the pole list is reported rather than
+   assumed for exactly this reason.
+8. **Complex poles were collapsed onto the real axis.** The characteristic
+   polynomial was built using `pole.real()` only, so `-1 +/- 2j` produced
+   `(s+1)^2` instead of `(s+1)^2 + 4`: K = [1, 2] instead of [5, 2]. The loop was
+   still stable, which is why nothing but an exact-value check would notice. The
+   product is now carried out in complex arithmetic and a non-conjugate request
+   is refused.
+9. **A `JacobiSVD` was used without `ComputeThinU`/`ComputeThinV`**, which aborts
    in a debug build and reads out of bounds in a release build. Found by the test
    suite segfaulting, which is exactly why the test framework has a `KCTL_TRACE`
    switch: when a test crashes the process instead of failing an assertion,

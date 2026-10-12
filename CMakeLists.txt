@@ -65,6 +65,8 @@ option(CONTROL_WERROR "Treat warnings as errors" OFF)
 # ---------------------------------------------------------------------------
 add_library(control
     src/analysis.cpp
+    src/codegen.cpp
+    src/design.cpp
     src/discretize.cpp
     src/lti.cpp
     src/types.cpp)
@@ -93,8 +95,39 @@ target_include_directories(control_test_support
 target_link_libraries(control_test_support PUBLIC control::control)
 target_compile_options(control_test_support PRIVATE ${CONTROL_WARNINGS})
 
+# The generated controller is produced at build time, then compiled and compared
+# against an independent implementation (the cross-check gate). Wiring it this way
+# means the emitted code cannot rot: if the generator changes and the emitted
+# header stops compiling or stops agreeing with the reference, the test fails.
+set(GENERATED_CONTROLLER_DIR ${CMAKE_CURRENT_BINARY_DIR}/generated)
+set(GENERATED_CONTROLLER ${GENERATED_CONTROLLER_DIR}/PositioningController.h)
+
+add_executable(generate_controller examples/generate_controller.cpp)
+target_link_libraries(generate_controller PRIVATE control::control)
+target_include_directories(generate_controller PRIVATE examples)
+
+add_custom_command(
+    OUTPUT ${GENERATED_CONTROLLER}
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${GENERATED_CONTROLLER_DIR}
+    COMMAND generate_controller ${GENERATED_CONTROLLER}
+    DEPENDS generate_controller
+    COMMENT "Generating the deployable controller header")
+add_custom_target(generated_controller_header DEPENDS ${GENERATED_CONTROLLER})
+
+add_executable(generated_controller_test
+    tests/generated_controller_test.cpp
+    ${GENERATED_CONTROLLER})
+add_dependencies(generated_controller_test generated_controller_header)
+target_link_libraries(generated_controller_test PRIVATE control_test_support)
+target_include_directories(generated_controller_test PRIVATE
+    ${GENERATED_CONTROLLER_DIR} examples)
+
+add_test(NAME generated_controller COMMAND generated_controller_test)
+
 add_executable(control_tests
     tests/analysis_test.cpp
+    tests/codegen_test.cpp
+    tests/design_test.cpp
     tests/discretize_test.cpp
     tests/lti_test.cpp
     tests/types_test.cpp)

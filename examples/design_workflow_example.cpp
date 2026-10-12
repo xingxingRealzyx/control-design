@@ -34,6 +34,9 @@
 #include <iostream>
 #include <stdexcept>
 
+#include "control/analysis.h"
+#include "control/codegen.h"
+#include "control/design.h"
 #include "control/discretize.h"
 #include "control/lti.h"
 
@@ -152,7 +155,34 @@ int main() {
                   << problem.what() << "\n";
     }
 
-    // ---- 4. the numbers that go into firmware ---------------------------
+    // ---- 4. what can be done with it ------------------------------------
+    std::cout << "\n=== controllability and observability ===\n";
+    const control::ControllabilityResult controllability =
+        control::AnalyseControllability(result.system);
+    const control::ObservabilityResult observability =
+        control::AnalyseObservability(result.system);
+    std::cout << "  controllability: "
+              << control::DescribeControllability(controllability)
+              << "\n  observability:   "
+              << control::DescribeObservability(observability) << "\n";
+
+    // ---- 5. design ------------------------------------------------------
+    // An LQR with integral action on the speed error, so a constant speed
+    // reference is tracked without offset. The weights are the design choice;
+    // everything else follows from them.
+    std::cout << "\n=== design: DLQR with integral action ===\n";
+    control::Matrix state_weight = control::Matrix::Zero(2, 2);
+    state_weight << 1.0, 0.0, 0.0, 0.1;  // speed matters more than current
+    control::Matrix integral_weight = control::Matrix::Zero(1, 1);
+    integral_weight << 10.0;
+    control::Matrix input_weight = control::Matrix::Zero(1, 1);
+    input_weight << 1.0;
+    const control::AugmentedDesign design = control::AddIntegralActionLqr(
+        result.system, 0, state_weight, integral_weight, input_weight);
+    std::cout << control::FormatDesignSummary(
+        design.design, "gain on [current; speed; integral of speed error]:");
+
+    // ---- 6. the numbers that go into firmware ---------------------------
     std::cout
         << "\n=== the model to deploy ===\n"
         << "  Ad = \n"
@@ -164,5 +194,37 @@ int main() {
            "  that runs x[k+1] = Ad x[k] + Bd u[k] at this sample time "
            "reproduces\n"
            "  the continuous behaviour at every sample instant, exactly.\n";
+
+    // ---- 7. emit the controller -----------------------------------------
+    // The gain above is a design; this is the artefact that runs on the target.
+    // The emitted header is compiled by the test suite and compared against an
+    // independent implementation over 3000 ticks, so it is not taken on trust.
+    std::cout << "\n=== generated controller ===\n";
+    control::CodegenOptions codegen;
+    codegen.controller_name = "MotorSpeedController";
+    codegen.namespace_name = "motor";
+    codegen.real_type =
+        "float";  // a typical MCU has no reason to use double here
+    codegen.saturate = true;
+    codegen.input_min = -24.0;  // supply voltage limit
+    codegen.input_max = 24.0;
+    codegen.provenance =
+        "DLQR with integral action on the speed error, from "
+        "design_workflow_example";
+    codegen.state_units = {"A", "rad/s"};
+    codegen.input_unit = "V";
+    codegen.output_unit = "rad/s";
+    const control::CodegenResult generated =
+        control::GenerateControllerWithIntegral(result.system, design, codegen);
+    std::cout << "  " << generated.suggested_filename << ": "
+              << generated.header.size() << " bytes, states "
+              << generated.state_dimension << ", observer "
+              << (generated.has_observer ? "yes" : "no") << ", integral action "
+              << (generated.has_integral_action ? "yes" : "no") << "\n\n"
+              << generated.usage_example << "\n  Write generated.header to "
+              << generated.suggested_filename
+              << " and compile it with the\n  firmware: it needs <array>, "
+                 "<cmath> and "
+                 "<cstddef>, nothing else.\n";
     return 0;
 }
