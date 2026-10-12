@@ -162,9 +162,18 @@ PersistencyResult CheckPersistency(const Eigen::VectorXd& input,
         throw std::invalid_argument(
             "CheckPersistency: the orders must be at least one");
     }
-    const int first = std::max(denominator_order, delay + numerator_order - 1);
+    const int parameters = denominator_order + numerator_order;
+    // The regressor is built from `parameters` lagged copies of the input, so the
+    // first usable index has to leave that many past samples. The usual ARX bound,
+    // max(na, delay + nb - 1), is not enough: with na = nb = 3 it gives 3, and the
+    // regressor then asks for input[index - 5] on its first row - a negative index.
+    // In a release build that reads whatever is in front of the array, silently, and
+    // the condition number reported here was different on different platforms
+    // because it was measuring that garbage. A debug build and AddressSanitizer both
+    // stop at it; the release build does not.
+    const int first = std::max(parameters, std::max(denominator_order, delay + numerator_order - 1));
     PersistencyResult result;
-    result.parameters = denominator_order + numerator_order;
+    result.parameters = parameters;
     result.samples = static_cast<int>(input.size()) - first;
     if (result.samples < result.parameters) {
         result.notes = "not enough samples for the requested order: " +
